@@ -1,0 +1,90 @@
+name: Custom FusionX - Fastboot Bootable
+
+on:
+  workflow_dispatch:
+    inputs:
+      STOCK_BOOT_URL:
+        description: 'Link Direct Download stock boot.img ROM kamu saat ini'
+        required: true
+        default: ''
+      CLANG_TOOLCHAIN:
+        description: 'Pilih Compiler Clang'
+        default: 'aosp clang 20'
+        required: true
+        type: choice
+        options:
+          - neutron
+          - aosp clang 20
+          - aosp clang 21
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Mengambil source code langsung dari repository kamu sendiri (branch main)
+      - name: Checkout Source Kernel
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex libncurses6 g++-multilib gcc-multilib git gnupg gperf imagemagick lib32readline-dev lib32z1-dev liblz4-tool libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3
+
+      - name: Download & Extract Clang
+        run: |
+          if [[ "${{ github.event.inputs.CLANG_TOOLCHAIN }}" == "aosp clang 20" ]]; then
+            wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz -O clang.tar.gz
+            mkdir -p clang-aosp-20 && tar -xf clang.tar.gz -C clang-aosp-20
+            echo "CLANG_PATH=$(pwd)/clang-aosp-20/bin" >> $GITHUB_ENV
+          elif [[ "${{ github.event.inputs.CLANG_TOOLCHAIN }}" == "aosp clang 21" ]]; then
+            wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/508ea7dd0d8f681904d0422e98af9613aaabf180/clang-r574158.tar.gz -O clang.tar.gz
+            mkdir -p clang-aosp-21 && tar -xf clang.tar.gz -C clang-aosp-21
+            echo "CLANG_PATH=$(pwd)/clang-aosp-21/bin" >> $GITHUB_ENV
+          else
+            wget https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/10032024/neutron-clang-10032024.tar.zst -O clang.tar.zst
+            mkdir -p clang-neutron && unzstd -d clang.tar.zst && tar -xf clang.tar -C clang-neutron
+            echo "CLANG_PATH=$(pwd)/clang-neutron/bin" >> $GITHUB_ENV
+          fi
+
+      - name: Build Kernel Binary & DTB
+        run: |
+          export PATH="${{ env.CLANG_PATH }}:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_USER="Genta"
+          export KBUILD_BUILD_HOST="GitHub-Actions"
+
+          # Menjalankan proses build langsung dari workspace repo kamu
+          make O=out vendor/munch_defconfig
+          make O=out olddefconfig
+          make O=out CC=clang -j$(nproc --all) CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1
+
+      - name: Setup Android Image Kitchen (AIK)
+        run: |
+          # Download stock boot dari input link user
+          wget "${{ github.event.inputs.STOCK_BOOT_URL }}" -O stock_boot.img
+          
+          # Ambil tools AIK Linux CLI
+          git clone https://github.com/osm0sis/Android-Image-Kitchen.git AIK
+          cp stock_boot.img AIK/
+
+      - name: Inject Kernel ke Boot Image
+        run: |
+          cd AIK
+          ./unpackimg.sh stock_boot.img
+          
+          # Suntikkan Image dan DTB hasil kompilasi ke dalam folder split_img AIK
+          cp ../out/arch/arm64/boot/Image split_img/stock_boot.img-kernel
+          if [ -f "split_img/stock_boot.img-dtb" ] && [ -f "../out/arch/arm64/boot/dtb.img" ]; then
+             cp ../out/arch/arm64/boot/dtb.img split_img/stock_boot.img-dtb
+          fi
+          
+          # Kemas kembali menjadi img baru
+          ./repackimg.sh
+          cp image-new.img ../fastboot_bootable.img
+
+      - name: Upload Bootable Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Custom-Kernel-Fastboot-Image
+          path: fastboot_bootable.img
